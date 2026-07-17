@@ -55,6 +55,6 @@ EMERGENCY_KEYWORDS = [
 
 EMERGENCY_RESPONSE = (
     "This sounds like it could be urgent. Please contact a doctor, urgent care, or emergency "
-    "services right away rather than relying on this assistant. If you're in the US, you can call "
-    "911 for a medical emergency or 988 for a mental health crisis."
+    "services right away rather than relying on this assistant. If you're in the UK, you can call "
+    "111 for a medical emergency or 988 for a mental health crisis."
 )

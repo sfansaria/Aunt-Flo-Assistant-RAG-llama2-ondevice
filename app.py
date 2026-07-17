@@ -64,7 +64,11 @@ if prompt := st.chat_input("Ask about periods, cycles, symptoms, and more..."):
                 if raw_line.startswith("event:"):
                     event = raw_line.split(":", 1)[1].strip()
                 elif raw_line.startswith("data:"):
-                    data_lines.append(raw_line.split(":", 1)[1].strip())
+                    value = raw_line.split(":", 1)[1]
+                    if value.startswith(" "):
+                        value = value[1:]
+                    data_lines.append(value)
+                   
 
         placeholder.markdown(full_text)
         if sources:
