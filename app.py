@@ -1,90 +1,88 @@
+"""
+Streamlit frontend for Aunt Flo Assistant.
+Talks to the FastAPI backend over HTTP/SSE instead of loading the model
+directly — this is what lets the frontend and inference layer scale and
+deploy independently.
 
-#Import Libraries
+Run:
+    streamlit run app.py
+"""
+import json
+import uuid
 
+import requests
 import streamlit as st
-from streamlit_chat import message
-from langchain.chains import ConversationalRetrievalChain
-from langchain_community.document_loaders import PyPDFLoader, DirectoryLoader
-from langchain_community.embeddings import HuggingFaceEmbeddings
-from langchain_community.llms import CTransformers
-from langchain.text_splitter import RecursiveCharacterTextSplitter
-from langchain_community.vectorstores import FAISS
-from langchain.memory import ConversationBufferMemory
-import datetime
 
-#Using the Vectorstore Database in the working directory
-vectorstore_database_path = '/Users/sabafirdausansaria/Downloads/Aunt_Flo_Assistant_Using_Conversational_RAG_LLAMA2/vectorstore/db'
+API_URL = "http://localhost:8000"
 
-#create the embeddings
-embeddings = HuggingFaceEmbeddings(model_name="sentence-transformers/all-MiniLM-L6-v2", model_kwargs={'device':"cpu"})
+st.set_page_config(page_title="Aunt Flo Assistant ��🤖", page_icon="🌸")
+st.title("Aunt Flo Assistant 🌸")
+st.caption("A friendly guide to menstrual & reproductive health. Not a substitute for medical advice.")
 
-#Loading the vectorstore database
-vectorstore_db = FAISS.load_local(vectorstore_database_path, embeddings, allow_dangerous_deserialization = True)
+if "session_id" not in st.session_state:
+    st.session_state.session_id = str(uuid.uuid4())
+if "messages" not in st.session_state:
+    st.session_state.messages = []
 
-#create the llm 
-llm = CTransformers(model="/Users/sabafirdausansaria/Downloads/Aunt_Flo_Assistant_Using_Conversational_RAG_LLAMA2/Model/llama-2-7b-chat.ggmlv3.q4_0.bin",
-                    model_type="llama",
-                    config={'max_new_tokens':512, 'temperature':0.2})
-#Create the Memory
-memory = ConversationBufferMemory(memory_key="chat_history", return_messages=True)
+for msg in st.session_state.messages:
+    with st.chat_message(msg["role"]):
+        st.markdown(msg["content"])
+        if msg.get("sources"):
+            with st.expander("Sources"):
+                for s in msg["sources"]:
+                    st.markdown(f"- {s['source']}, p.{s['page']}")
 
-#Using the Conversational Retrieval Chain for maintaining the memory in the conversation, understanding the context of each query in relation to the ongoing conversation, and retrieving more relevant information from a knowledge base.
- 
-chain = ConversationalRetrievalChain.from_llm(llm=llm, chain_type='stuff', 
-                                              retriever=vectorstore_db.as_retriever(search_kwargs={"k":2}),
-                                              memory = memory)
+if prompt := st.chat_input("Ask about periods, cycles, symptoms, and more..."):
+    st.session_state.messages.append({"role": "user", "content": prompt})
+    with st.chat_message("user"):
+        st.markdown(prompt)
 
+    with st.chat_message("assistant"):
+        placeholder = st.empty()
+        full_text = ""
+        sources = []
 
-#Start the streamlit
+        with requests.post(
+            f"{API_URL}/chat",
+            json={"query": prompt, "session_id": st.session_state.session_id},
+            stream=True,
+            timeout=120,
+        ) as resp:
+            event, data_lines = None, []
+            for raw_line in resp.iter_lines(decode_unicode=True):
+                if raw_line is None or raw_line == "":
+                    if event == "sources" and data_lines:
+                        try:
+                            sources = json.loads("".join(data_lines).replace("'", '"'))
+                        except Exception:
+                            sources = []
+                    elif data_lines:
+                        full_text += "".join(data_lines)
+                        placeholder.markdown(full_text + "▌")
+                    event, data_lines = None, []
+                    continue
+                if raw_line.startswith("event:"):
+                    event = raw_line.split(":", 1)[1].strip()
+                elif raw_line.startswith("data:"):
+                    data_lines.append(raw_line.split(":", 1)[1].strip())
 
-st.set_page_config(page_title="Welcome to the Aunt Flo Assistant",page_icon="🤗",)
-st.title("Welcome to Aunt Flo Assistant 👩‍⚕️") 
-    
-st.date_input("what is today's date", datetime.datetime.now())
+        placeholder.markdown(full_text)
+        if sources:
+            with st.expander("Sources"):
+                for s in sources:
+                    st.markdown(f"- {s['source']}, p.{s['page']}")
 
-def Chat_Conversation(query):
-    result = chain({"question": query, "chat_history": st.session_state['history']})
-    st.session_state['history'].append((query, result["answer"]))
-    return result["answer"]
+    st.session_state.messages.append(
+        {"role": "assistant", "content": full_text, "sources": sources}
+    )
 
-def initialize_session_state():
-    if 'history' not in st.session_state:
-        st.session_state['history'] = []
-
-    #Generated indicates the Chatbot response
-    if 'generated' not in st.session_state:
-        st.session_state['generated'] = ["Hello! Ask me anything about Periods🤗"]
-
-    #Past denotes the Human User's Input
-    if 'past' not in st.session_state:
-        st.session_state['past'] = ["Heyya 👋"]
-
-def display_chat_history():
-
-    reply_container = st.container()
-    container = st.container()
-
-    with container:
-        with st.form(key='my_form', clear_on_submit=True):
-            user_input = st.text_input("Ask Something", placeholder="Ask about your Menstrual Cycle related questions", key='input')
-            submit_button = st.form_submit_button(label='Send')
-      
-
-        if submit_button and user_input:
-            output = Chat_Conversation(user_input)
-
-            st.session_state['past'].append(user_input)
-            st.session_state['generated'].append(output)
-
-        
-
-    if st.session_state['generated']:
-        with reply_container:
-            for i in range(len(st.session_state['generated'])):
-                message(st.session_state["past"][i], is_user=True, key=str(i) + '_user', avatar_style="initials", seed="User")
-                message(st.session_state["generated"][i], key=str(i), avatar_style="initials", seed="AI")
-
-# Initialize session state
-initialize_session_state()
-# Display chat history
-display_chat_history()
+with st.sidebar:
+    st.markdown("### About")
+    st.markdown(
+        "Aunt Flo Assistant answers questions using a curated knowledge base "
+        "via retrieval-augmented generation. Answers include source citations."
+    )
+    if st.button("Clear conversation"):
+        requests.post(f"{API_URL}/reset", params={"session_id": st.session_state.session_id})
+        st.session_state.messages = []
+        st.rerun()

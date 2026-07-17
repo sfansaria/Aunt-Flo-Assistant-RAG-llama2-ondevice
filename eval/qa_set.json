@@ -1,0 +1,14 @@
+[
+  {
+    "question": "What is the average length of a menstrual cycle?",
+    "expected_keywords": ["28", "days", "cycle"]
+  },
+  {
+    "question": "What foods can help support fertility?",
+    "expected_keywords": ["egg", "nutrition"]
+  },
+  {
+    "question": "What is PMS?",
+    "expected_keywords": ["premenstrual", "symptoms"]
+  }
+]
