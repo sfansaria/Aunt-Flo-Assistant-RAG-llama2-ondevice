@@ -1,0 +1,45 @@
+services:
+  - type: web
+    name: aunt-flo-ollama
+    runtime: docker
+    dockerfilePath: ./Dockerfile.ollama
+    plan: standard
+    disk:
+      name: ollama-models
+      mountPath: /root/.ollama
+      sizeGB: 20
+    envVars:
+      - key: OLLAMA_HOST
+        value: 0.0.0.0:11434
+
+  - type: web
+    name: aunt-flo-api
+    runtime: docker
+    dockerfilePath: ./Dockerfile
+    plan: standard
+    disk:
+      name: vectorstore-data
+      mountPath: /app/vectorstore
+      sizeGB: 5
+    envVars:
+      - key: LLM_BASE_URL
+        value: https://aunt-flo-ollama.onrender.com/v1
+      - key: LLM_API_KEY
+        value: ollama
+      - key: LLM_MODEL
+        value: qwen2.5:1.5b
+      - key: USE_RERANKER
+        value: "false"
+      - key: RETRIEVAL_TOP_K
+        value: "4"
+      - key: FINAL_TOP_K
+        value: "3"
+
+  - type: web
+    name: aunt-flo-frontend
+    runtime: docker
+    dockerfilePath: ./Dockerfile.frontend
+    plan: starter
+    envVars:
+      - key: API_URL
+        value: https://aunt-flo-api.onrender.com
