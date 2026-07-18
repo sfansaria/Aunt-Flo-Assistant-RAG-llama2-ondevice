@@ -27,7 +27,7 @@ llm_client = OpenAI(base_url=config.LLM_BASE_URL, api_key=config.LLM_API_KEY)
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     memory.init_db()
-    get_retriever()  # warm up embedding/reranker models once at startup
+    #get_retriever()  # warm up embedding/reranker models once at startup
     yield
 
 
