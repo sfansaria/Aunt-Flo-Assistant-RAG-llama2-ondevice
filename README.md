@@ -1,77 +1,96 @@
 # Aunt Flo Assistant 🌸
 
-A retrieval-augmented chatbot for menstrual and reproductive health education —
-rebuilt on a modern, production-ready RAG stack.
+A retrieval-augmented chatbot for menstrual and reproductive health education — rebuilt on a
+modern, production-ready RAG stack and deployed as three independent services on Fly.io.
+
+**Live app:** https://aunt-flo-frontend.fly.dev
 
 ## What changed from the original
 
 | | Before | Now |
 |---|---|---|
-| Model format | GGML (deprecated) | GGUF via **Ollama** (or any hosted LLM API) |
-| Retrieval | FAISS, dense only | **Qdrant** + **BM25 hybrid search** + cross-encoder **reranker** |
+| Model format | GGML (deprecated) | GGUF via **Ollama** |
+| Retrieval | FAISS, dense only | **Qdrant** + **BM25 hybrid search** + cross-encoder **reranker** (toggleable) |
 | Embeddings | implicit/basic | **BAAI/bge-small-en-v1.5** |
 | Architecture | single Streamlit script | **FastAPI backend** + Streamlit frontend, talking over SSE |
 | Memory | in-process Streamlit state | **SQLite**-backed session history |
 | Citations | none | source + page shown per answer |
 | Safety | none | emergency-keyword short-circuit + disclaimer system prompt |
-| Deployment | manual `streamlit run` | Docker + docker-compose + CI |
+| Deployment | manual `streamlit run` | Three **Docker** containers, deployed independently on **Fly.io** |
 | Quality checks | none | lightweight keyword-based eval set |
-
-## Detailed changelog vs. the original repo
-
-**Model & inference**
-- Removed `ctransformers` + GGML weights (`llama-2-7b-chat.ggmlv3.q4_0.bin`) — GGML has been deprecated in favor of GGUF since 2023 and ctransformers is unmaintained.
-- Inference now goes through **Ollama's OpenAI-compatible API**, defaulting to `llama3.1:8b`. Swappable to any GGUF model or a hosted LLM API purely via `.env` — no code changes.
-
-**Retrieval (previously: raw FAISS, no metadata, no reranking)**
-- `ingest.py` rewritten: chunks now carry `source` and `page` metadata (needed for citations), embeddings come from a real sentence-transformers model (`bge-small-en-v1.5`) instead of whatever FAISS's default was.
-- Vector store moved from FAISS to **Qdrant** (adds metadata filtering, easier to swap to a networked instance later).
-- New: a parallel **BM25 sparse index** (`rank_bm25`), merged with dense results for **hybrid search** — meaningfully better recall on medical/domain terms.
-- New: a **cross-encoder reranker** (`bge-reranker-base`) reorders hybrid candidates before they reach the LLM.
-
-**Generation**
-- New: **source citations** — every answer is grounded in numbered context passages `[1] [2]`, and the frontend shows the source PDF + page per answer. The original had no citation mechanism at all.
-- New: **emergency-keyword safety check** (`config.py`) that short-circuits generation and returns a "see a doctor" message for concerning queries, plus a disclaimer baked into the system prompt. Not present before.
-
-**Architecture (previously: a single `app.py` Streamlit script doing everything)**
-- Split into a **FastAPI backend** (`main.py`) that owns retrieval + generation + streaming, and a thin **Streamlit frontend** (`app.py`) that just calls the API over SSE. This is what makes independent scaling/deployment and a future non-Streamlit frontend possible.
-- Conversation memory moved from Streamlit's in-process session state to a **SQLite-backed store** (`memory.py`) — survives restarts, works across multiple frontend instances.
-- Responses now **stream token-by-token** to the frontend instead of arriving all at once.
-
-**Deployment (previously: none — `streamlit run app.py` locally only)**
-- New: `Dockerfile` (API), `Dockerfile.frontend` (Streamlit), and `docker-compose.yml` wiring up Ollama + API + frontend as separate services.
-- New: GitHub Actions CI (`.github/workflows/ci.yml`) running tests on every push, with a commented-out deploy job as a starting point.
-
-**Quality & testing (previously: none)**
-- New: `eval/qa_set.json` + `eval/run_eval.py` — a lightweight keyword-based eval loop to catch retrieval/prompt regressions.
-- New: `tests/test_api.py` — smoke tests for the safety-check logic, run in CI.
 
 ## Architecture
 
+The app is split into **three separate Fly.io apps**, each in its own container, communicating
+over public HTTPS:
+
 ```
-PDFs → ingest.py → Qdrant (dense) + BM25 (sparse)
-                          │
-                    retrieval.py (hybrid search + rerank)
-                          │
-Streamlit (app.py) ──SSE──▶ FastAPI (main.py) ──▶ LLM (Ollama or hosted API)
-                          │
-                     memory.py (SQLite session history)
+                    ┌─────────────────────┐
+   User's browser → │  aunt-flo-frontend   │  (Streamlit)
+                    └──────────┬──────────┘
+                               │ HTTPS
+                               ▼
+                    ┌─────────────────────┐
+                    │ auntfloassistant-    │  (FastAPI + Qdrant + BM25)
+                    │ hybridragondevice    │
+                    └──────────┬──────────┘
+                               │ HTTPS
+                               ▼
+                    ┌─────────────────────┐
+                    │   aunt-flo-ollama    │  (Ollama, qwen2.5:1.5b)
+                    └─────────────────────┘
 ```
 
-The LLM backend is swappable via three env vars (`LLM_BASE_URL`, `LLM_API_KEY`,
-`LLM_MODEL`) — no code changes needed to move from local Ollama to a hosted API.
+**Why public HTTPS between the apps, not Fly's private networking?** Fly's private network
+(`.internal` / `.flycast`) requires dual-stack IPv6/IPv4 binding and DNS provisioning that this
+setup didn't have configured correctly, causing intermittent connection failures. Every app talks
+to the others over its normal public `https://*.fly.dev` URL instead — proven reliable in testing,
+still fully encrypted, and simpler to reason about for a project this size.
 
-## Setup
+Ingestion flow (run once, offline, whenever the source PDFs change):
+```
+PDFs → ingest.py → Qdrant (dense vectors) + BM25 (sparse index)
+```
 
-### 1. Install Ollama and pull a model (skip if using a hosted API instead)
+Query flow (every chat message):
+```
+User question → Streamlit → FastAPI → hybrid retrieval + rerank → Ollama → streamed, cited answer
+```
+
+## Repo structure
+
+```
+.
+├── main.py              FastAPI backend: retrieval + generation + streaming + safety check
+├── retrieval.py          Hybrid search (Qdrant + BM25) with optional cross-encoder reranking
+├── ingest.py             One-off script: PDFs → chunks → embeddings → Qdrant + BM25
+├── memory.py             SQLite-backed conversation history per session
+├── config.py             Central config, all overridable via env vars / Fly secrets
+├── app.py                 Streamlit frontend, calls the API over SSE
+├── Dockerfile             API container image
+├── Dockerfile.frontend    Frontend container image
+├── docker-compose.yml     Local multi-container setup (API + frontend; Ollama runs natively)
+├── fly.toml               Fly config for the API app
+├── eval/                  Lightweight keyword-based answer-quality checks
+├── tests/                 Smoke tests (safety-check logic), run in CI
+└── .github/workflows/     CI: runs tests on every push
+```
+
+The Ollama and frontend Fly apps live in sibling directories (`aunt-flo-ollama/`,
+`aunt-flo-frontend/`) with their own minimal `Dockerfile` + `fly.toml`, since Fly deploys one app
+per directory rather than orchestrating multi-service Compose files the way Render does.
+
+## Local development
+
+### 1. Install Ollama and pull a model
 
 ```bash
-curl -fsSL https://ollama.com/install.sh | sh
-ollama pull llama3.1:8b
-ollama serve
+curl -fsSL https://ollama.com/install.sh | sh   # or `brew install ollama` on Mac
+ollama serve &
+ollama pull qwen2.5:1.5b
 ```
 
-### 2. Install Python dependencies
+### 2. Python environment
 
 ```bash
 python -m venv .venv && source .venv/bin/activate
@@ -82,7 +101,6 @@ pip install -r requirements.txt
 
 ```bash
 cp .env.example .env
-# edit .env if you want a hosted LLM API, different models, etc.
 ```
 
 ### 4. Add your knowledge base and ingest it
@@ -93,58 +111,89 @@ Drop PDFs into `data/`, then:
 python ingest.py
 ```
 
-This builds the Qdrant vector store and BM25 index under `vectorstore/`.
-
-### 5. Run the backend
+### 5. Run the backend and frontend (two terminals)
 
 ```bash
 uvicorn main:app --reload --port 8000
 ```
-
-### 6. Run the frontend
-
 ```bash
 streamlit run app.py
 ```
 
 Open http://localhost:8501.
 
-## Running with Docker
+### Running with Docker locally
 
 ```bash
 docker compose up --build
-docker compose exec ollama ollama pull llama3.1:8b   # first run only
 ```
 
-Then run ingestion once (either locally against the mounted `vectorstore/`
-volume, or by exec-ing into the `api` container) before using the app.
+Ollama runs natively on the host (for GPU/Metal acceleration on Mac); the API container reaches
+it via `host.docker.internal`. Run `python ingest.py` once against the mounted `vectorstore/`
+volume before using the app.
+
+## Production deployment (Fly.io)
+
+Each service is its own Fly app:
+
+| App | Purpose | Key config |
+|---|---|---|
+| `auntfloassistanthybridragondevice` | FastAPI backend | 2GB+ RAM, persistent volume at `/data` for vector store + sessions |
+| `aunt-flo-ollama` | LLM serving | 2GB+ RAM, persistent volume at `/root/.ollama` for model weights |
+| `aunt-flo-frontend` | Streamlit UI | Lightweight, no persistent storage needed |
+
+All three set `min_machines_running = 1` to stay warm (no cold-start delay).
+
+**Key secrets** (set via `fly secrets set`):
+```
+# On the API app
+LLM_BASE_URL=https://aunt-flo-ollama.fly.dev/v1
+LLM_MODEL=qwen2.5:1.5b
+USE_RERANKER=false
+QDRANT_PATH=/data/vectorstore/qdrant_db
+BM25_INDEX_PATH=/data/vectorstore/bm25.pkl
+SESSION_DB_PATH=/data/sessions.db
+
+# On the frontend app
+API_URL=https://auntfloassistanthybridragondevice.fly.dev
+```
+
+**One-time setup on the deployed API app** (PDFs and the vector store live on the persistent
+volume, not in the Docker image):
+```bash
+fly ssh sftp shell -a auntfloassistanthybridragondevice
+# put your PDFs into /data/pdfs/
+
+fly ssh console -a auntfloassistanthybridragondevice
+python ingest.py
+```
+
+**Pull the model onto the Ollama app once:**
+```bash
+fly ssh console -a aunt-flo-ollama
+ollama pull qwen2.5:1.5b
+```
 
 ## Evaluation
-
-After changing the prompt, retrieval settings, or embedding model, sanity-check
-quality with the small eval set:
 
 ```bash
 python eval/run_eval.py
 ```
 
-Edit `eval/qa_set.json` to add real questions from your own knowledge base —
-the shipped set is just a starting example.
+Runs a small set of test questions (`eval/qa_set.json`) against the running API and checks
+whether expected keywords appear in the answers — catches obvious retrieval/prompt regressions
+before they reach users.
 
-## Deployment notes
+## Notes on cost, performance, and safety
 
-- The `api` and `frontend` services are independent — deploy them as separate
-  services/containers so you can scale or restart them independently.
-- Qdrant here runs in embedded/file mode for simplicity. For multi-instance
-  deployments, switch to a standalone Qdrant server (`qdrant/qdrant` image)
-  and point `QdrantClient` at it via URL instead of a local path.
-- Ollama needs real CPU/RAM (4 vCPU / 8GB is a reasonable floor for an 8B
-  quantized model). If cost or latency is a concern, swap in a hosted LLM API
-  via `.env` instead of self-hosting inference.
-- Tighten the CORS origin in `main.py` before exposing this publicly.
-- This is a health-information assistant, not a medical device — the system
-  prompt and emergency-keyword check in `config.py` are a starting point, not
-  a complete safety solution. Review and expand `EMERGENCY_KEYWORDS` deliberately.
+- Ollama on Fly runs **CPU-only** (no GPU on standard tiers) — expect several seconds per response,
+  and only one request processed at a time (`OLLAMA_NUM_PARALLEL=1`). For heavier traffic, swap
+  `LLM_BASE_URL` to a hosted LLM API instead — no other code changes needed.
+- This is a health-information assistant, not a medical device. `config.py`'s
+  `EMERGENCY_KEYWORDS` list and system prompt disclaimer are a starting point, not a complete
+  safety solution — review and expand deliberately before wider release.
+- Running three always-on Fly machines has an ongoing cost; scale `min_machines_running` back to
+  `0` on the frontend/API if idle-time cost matters more than instant response for early users.
 
 ## License
 
